@@ -7,7 +7,14 @@ import os
 import os.path
 import optparse
 import sys
-import pysam
+import csv
+import random
+
+def FormatPosList(posList):
+	if(len(posList) == 0):
+		return 'NA'
+	return ','.join(map(str, posList))
+
 
 def main():
 
@@ -62,11 +69,109 @@ def main():
 
 			refSeq += line.strip().upper()
 	refSeqFile.close()
-
-	# analyse algnments
-
-	print('[*] Analyzing...')
 	
+	# build CG list
+	# CG list format {pos:[[tagindex, offsetindex]]}
+	
+	dictCG = {str(m.start() + 1) :[] for m in re.finditer('CG', refSeq)}
+
+	# analyse tags
+
+	print('[*] Loading and parsing tagmeth...')
+
+	# tagmeth data structure 
+	# tagitem = ['tagname', 'type', 'cvt', 'chr', pos, len, meth=[[25, 'M'], [35, 'U'], ['45', 'X']]]
+	#
+	tagmeth = []
+	with open(inputFileName, 'rb') as csvfile :
+		tags = csv.reader(csvfile, delimiter = '\t')
+		# next(tags, None)  # skip the headers
+		index = 0
+		for tag in tags:
+			posList = []
+
+			# parse tag positions 
+			
+			if(tag[6] != 'NA' ):
+				poses = tag[6].split(',')
+				posList += [[int(p), 'M'] for p in poses]
+
+			if(tag[7] != 'NA'):
+				poses = tag[7].split(',')
+				posList += [[int(p), 'U'] for p in poses]
+
+			if(tag[8] != 'NA'):
+				poses = tag[8].split(',')
+				posList += [[int(p), 'X'] for p in poses]
+
+			del tag[6:12]
+			tag.append(posList)
+
+			# register the tag
+
+			basePos = int(tag[4])
+			basePos -= 1
+			tag[4] = basePos
+			offsetIndex = 0
+			for pos in posList:
+				abPos = str(pos[0] + basePos)
+				if(abPos in dictCG):
+					dictCG[abPos].append([index, offsetIndex])
+				else:
+					abPos = str(pos[0] + basePos - 1)
+					if(abPos in dictCG):
+						tag[4] = basePos - 1
+						dictCG[abPos].append([index, offsetIndex])
+					else:
+						print('warning: can not find cg position ', abPos, ' in cg list', tag)
+				offsetIndex += 1
+
+			tagmeth.append(tag)
+			index += 1
+
+	# shuffle cg methylation states
+
+	for cgPos, tagList in dictCG.iteritems():
+		
+		# gather methylation state list
+
+		listMeth = []
+		for tag in tagList:
+			tagItem = tagmeth[tag[0]]
+			listMeth += [tagItem[6][tag[1]][1]]
+	
+		# shuffle meth states
+		
+		random.shuffle(listMeth)
+		
+		# assign them back
+		
+		mIndex = 0
+		for tag in tagList:
+			tagItem = tagmeth[tag[0]]
+			tagItem[6][tag[1]][1] = listMeth[mIndex]
+			mIndex += 1
+
+	# write out the results
+
+	for tagItem in tagmeth: 
+		meth = []
+		unmeth = []
+		undt = []
+		for m in tagItem[6] : 
+			if (m[1] == 'M'):
+				meth += [m[0]]
+			elif (m[1] == 'U'):
+				unmeth += [m[0]]
+			elif (m[1] == 'X'):
+				undt += [m[0]]
+
+		outputFile.write('%s\t%s\t%s\t%s\t%15ld\t%s\t%s\t%s\t%s\t%d\t%d\t%d\n' % (tagItem[0], tagItem[1], tagItem[2], 
+			tagItem[3], tagItem[4], tagItem[5], 
+			FormatPosList(meth), 
+			FormatPosList(unmeth), 
+			FormatPosList(undt),
+			len(meth), len(unmeth), len(undt)))
 
 	print('[*] Complete')
 
