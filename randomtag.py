@@ -38,7 +38,7 @@ def main():
 	logFileName = baseFileName + '.tagmeth.log'
 
 	# load input files
-
+	
 	print('[*] Initializing...')
 
 	if(not os.path.exists(inputFileName)):
