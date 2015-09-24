@@ -1,0 +1,90 @@
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages(library("optparse", quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE))
+suppressPackageStartupMessages(library("IRanges", quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE))
+suppressPackageStartupMessages(library("GenomicRanges", quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE))
+suppressPackageStartupMessages(library("data.table", quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE))
+suppressPackageStartupMessages(library("tools", quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE))
+
+option_list <- list(
+  make_option(c("-r","--imprinted-range"), help="upstream size and downstream size of the imprinted gene when finding overlapps", default = 1000)
+)
+arguments <- parse_args(OptionParser(usage = "%prog [options] asmFilePath repeats.csv imprint.csv", option_list = option_list), positional_arguments = 3)
+opt <- arguments$options
+
+kImprintedRange <- opt$`imprinted-range`
+
+kAsmPath <- arguments$args[1]
+kRepeatFile <- arguments$args[2]
+kImprintFile <- arguments$args[3]
+
+if(!file.exists(kAsmPath)){
+  stop("tagmeth file path \"", kAsmPath ,"\" does not exist.")
+}
+
+if(!file.exists(kRepeatFile)){
+  stop("repeat database file\"", kRepeatFile ,"\" does not exist.")
+}
+
+if(!file.exists(kImprintFile)){
+  stop("imprint database file \"", kImprintFile ,"\" does not exist.")
+}
+
+# load databases
+
+message("Loading ", kRepeatFile, "\t", date())
+range.repeat <- fread(kRepeatFile, showProgress=FALSE)
+
+message("Loading ", kImprintFile, "\t", date())
+range.imprint <- fread(kImprintFile, showProgress=FALSE)
+
+asm.filenames <- list.files(kAsmPath)
+for (file.name in asm.filenames) {
+  file.path <- paste(kAsmPath, "/", file.name, sep="")
+  filename.base <- file_path_sans_ext(basename(file.path))
+  output.filename <- paste(filename.base, ".annotated.csv", sep="")
+  
+  # load data
+  
+  message("    processing ", file.path, "\t", date())
+  
+  range.asm <- fread(file.path, showProgress = FALSE)
+  setnames(range.asm, c("chr", "start", "end"))
+  range.asm$type <- rep("ASM", nrow(range.asm))
+  range.asm$anno <- rep("Detected", nrow(range.asm))
+  
+  gr.repeat <- GRanges(seqnames = range.repeat$genoName, 
+                       ranges = IRanges(start = range.repeat$genoStart, 
+                                        end = range.repeat$genoEnd),
+                       strand = range.repeat$strand)
+  gr.asm <- GRanges(seqnames = range.asm$chr,
+                    ranges = IRanges(start = range.asm$start,
+                                     end = range.asm$end))
+  gr.imprint <- GRanges(seqnames = range.imprint$chr,
+                        ranges = IRanges(start = range.imprint$start - kImprintedRange,
+                                         end = range.imprint$end + kImprintedRange))
+  
+  # annotate repeats
+  
+  ov.repeat <- findOverlaps(gr.repeat, gr.asm)
+  idx.overlaps <- unique(subjectHits(ov.repeat))
+  range.asm[idx.overlaps]$type <- "REPEAT"
+  idx.anno <- match(idx.overlaps, subjectHits(ov.repeat))
+  repeat.anno <- range.repeat[queryHits(ov.repeat[idx.anno])]
+  range.asm[idx.overlaps]$anno <- paste(repeat.anno$repClass, repeat.anno$repName, sep=":")
+  
+  # identify known imprints
+  
+  ov.imprint <- findOverlaps(gr.imprint, gr.asm)
+  idx.overlaps <- unique(subjectHits(ov.imprint))
+  range.asm[idx.overlaps]$type <- "IMPRINTED"
+  idx.anno <- match(idx.overlaps, subjectHits(ov.imprint))
+  imprint.anno <- range.imprint[queryHits(ov.imprint[idx.anno])]
+  range.asm[idx.overlaps]$anno <-paste(imprint.anno$gene, "(", imprint.anno$aliases, ")", sep="") 
+
+  # write output
+  
+  write.table(range.asm, file = output.filename, quote = FALSE, sep = "\t")
+}
+
+  

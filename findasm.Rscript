@@ -64,11 +64,14 @@ GenerateTagmethIndex <- function(genome, chr.tagmeth, chr.name, chr.pos, params 
 # RLE method is used
 #
 
-GetASMOfTagmethIndex <- function(tagmeth.indexing, range.size = 100, critera = list(meth, umeth))
+GetASMOfTagmethIndex <- function(tagmeth.indexing, range.size = 100, critera = list(meth, umeth, ratio))
 {
+
+  tagmeth.indexing$ratio <- tagmeth.indexing$umidx / tagmeth.indexing$midx
+
   # generate tagmeth marker
   
-  marker <- (tagmeth.indexing$midx > critera$meth) & (tagmeth.indexing$umidx > critera$umeth) & (tagmeth.indexing$umidx / tagmeth.indexing$midx > 0.1) & (tagmeth.indexing$umidx / tagmeth.indexing$midx < 10)
+  marker <- (tagmeth.indexing$midx > critera$meth) & (tagmeth.indexing$umidx > critera$umeth) & (tagmeth.indexing$ratio > critera$ratio) & (tagmeth.indexing$ratio < 1 / critera$ratio)
   
   # get the rle result
   
@@ -131,6 +134,7 @@ option_list <- list(
   make_option(c("-a","--asm-size"), help="asm range size", default = 500),
   make_option(c("-i","--methy-index"), help="methy index threshhold", default = 5),
   make_option(c("-x","--unmethy-index"), help="unmethy index threshold", default = 5),
+  make_option(c("-r","--index-ratio"), help="ratio threshold", default = 0.1),
   make_option(c("-l","--genome-library"), help="Bioconductor BSgenome library name", default = "BSgenome.Mmusculus.UCSC.mm9"),
   make_option(c("-n","--genome-name"), help="genome library object name. ex: \"Mmusculus\", \"Hsapiens\", \"Scerevisiae\"", default = "Mmusculus"),
   make_option(c("-t","--genome-type"), help="genome type , example mm9, mm10, hg19, hg18, default is NULL", default = "")
@@ -138,7 +142,7 @@ option_list <- list(
 
 # Get command line options
 
-arguments <- parse_args(OptionParser(usage = "%prog [options] tagmethFile", option_list = option_list), positional_arguments = 1)
+arguments <- parse_args(OptionParser(usage = "%prog [options] tagmethPath", option_list = option_list), positional_arguments = 1)
 opt <- arguments$options
 
 kUnmethyScore <- opt$`unmethy-score`
@@ -147,23 +151,20 @@ kSlidingWindow <- opt$`sliding-window`
 kAsmSize <- opt$`asm-size`
 kMethyIndex <- opt$`methy-index`
 kUnmethyIndex <- opt$`unmethy-index`
+kIndexRatio <- opt$`index-ratio`
 kGenomeLibrary <- opt$`genome-library`
 kGenomeName <- opt$`genome-name`
 kGenomeType <- opt$`genome-type`
 
-kTagmethFile <- arguments$args
+kTagmethPath <- arguments$args
 
 # load tagmeth files
 
-if(!file.exists(kTagmethFile)){
-  stop("tagmeth file \"", kTagmethFile,"\" does not exist.")
+if(!file.exists(kTagmethPath)){
+  stop("tagmeth file path \"", kTagmethPath,"\" does not exist.")
 }
 
-filename.base <- file_path_sans_ext(basename(kTagmethFile))
-idx.meth.wig.filename <- paste(filename.base, ".idx.meth.wig", sep = "")
-idx.umeth.wig.filename <- paste(filename.base, ".idx.umeth.wig", sep = "")
-asm.bed.filename <- paste(filename.base, ".asm.bed", sep = "")
-asm.csv.filename <- paste(filename.base, ".asm.csv", sep = "")
+filepath.base <- basename(kTagmethPath)
 
 # load the genome library
 
@@ -187,67 +188,95 @@ if ( is.null(kGenome)){
   stop( "Load Biocondutor Genome Library ERROR ")
 }
 
-# read and process tagmeth file by chrom
+tagmeth.filenames <- list.files(kTagmethPath)
+for (file.name in tagmeth.filenames) {
+  file.path <- paste(kTagmethPath, "/", file.name, sep="")
+  chr.name <- strsplit(file.name, "\\.")[[1]][1]
 
-idx.meth.wig.lines <- ''
-idx.umeth.wig.lines <- ''
-asm.bed.lines <- ''
-asm.csv.lines <- 'chr\tstart\tend'
+  filename.base <- file_path_sans_ext(basename(file.name))
+  idx.meth.wig.filename <- paste(filename.base, ".idx.meth.wig", sep = "")
+  idx.umeth.wig.filename <- paste(filename.base, ".idx.umeth.wig", sep = "")
+  asm.bed.filename <- paste(filename.base, ".asm.bed", sep = "")
+  asm.csv.filename <- paste(filename.base, ".asm.csv", sep = "")
 
-file.name = kTagmethFile
-# file.path <- paste(kTagmethPath, "/", file.name, sep="")
-# chr.name <- strsplit(file.name, "\\.")[[1]][1]
-chr.name <- "chr1"
+  idx.meth.wig.file <- file(idx.meth.wig.filename)
+  idx.umeth.wig.file <- file(idx.umeth.wig.filename)
+  asm.bed.file <- file(asm.bed.filename)
+  asm.csv.file <- file(asm.csv.filename)
 
-if(file_test("-f", file.name))
-{
-  message("    loading ", file.name, "\t", date())
-    
-  # Load tagmeth file
-  
-  chr.tagmeth <- fread(file.name, sep="\t",  
-                       colClasses=c("factor","character","character", "character", 
-                                    "integer","integer", "character", "character", "character",
-                                    "integer", "integer", "integer"),
-                       showProgress=FALSE, data.table=FALSE)
-  # Assign colnames
-    
-  colnames(chr.tagmeth) <- c("tag", "type", "cvt", "chr", "pos", "size", "mpos", "upos", "xpos", "mcount", "ucount", "xcount")
-  
-  # Calculate the midpoint of tags
-    
-  chr.tagmeth$mid <- round(chr.tagmeth$pos + chr.tagmeth$size / 2)
-  
-  # Calculate methylation score
-    
-  chr.tagmeth$score <- chr.tagmeth$mcount / (chr.tagmeth$mcount + chr.tagmeth$ucount + chr.tagmeth$xcount)
-  
-  # build methylation virtual vectors
-    
-  chr.pos <- c(1: length(kGenome[[chr.name]]))
-  
-  # genrate tagmeth indexing
-  
-  message("    genrating tagmeth indexing file ", file.name, "\t", date())
-  chr.tagmeth.idx <- GenerateTagmethIndex(kGenome, chr.tagmeth, chr.name, chr.pos, params = list(mscore = kMethyScore, umscore = kUnmethyScore, swsize = kSlidingWindow))
-  
-  # generate asm files
-  
-  message("    searching for asm regions ", "\t", date())
-  chr.tagmeth.asm <- GetASMOfTagmethIndex(chr.tagmeth.idx, kAsmSize, critera = list(meth = kMethyIndex, umeth = kUnmethyIndex))
-  chr.tagmeth.asm$chr <- rep(chr.name, nrow(chr.tagmeth.asm))
-  
-  # write wigfiles & bedfiles
-  
-  message("    writting output files ", "\t", date())
-  chr.wig.title <- paste("fixedStep chrom=", chr.name, " start=", min(chr.tagmeth.idx$pos), " step=1 span=1", sep = "")
-  write(chr.wig.title, idx.meth.wig.filename, append = TRUE)
-  write(chr.wig.title, idx.umeth.wig.filename, append = TRUE)
-  write(paste(chr.tagmeth.idx$midx, sep = '\n'), idx.meth.wig.filename, append = TRUE)
-  write(paste(-chr.tagmeth.idx$umidx, sep = '\n'), idx.umeth.wig.filename, append = TRUE)
-  
-  write(paste(paste(chr.tagmeth.asm$chr, chr.tagmeth.asm$start, chr.tagmeth.asm$end, sep = '\t'), sep = '\n'), asm.csv.filename, append = TRUE)
-  write(paste(paste(chr.tagmeth.asm$chr, chr.tagmeth.asm$start, chr.tagmeth.asm$end, rep(1, nrow(chr.tagmeth.asm)), sep = '\t'), sep = '\n'), asm.bed.filename, append = TRUE)
+  # read and process tagmeth file by chrom
 
-  message("    complete ", "\t", date())
+  idx.meth.wig.lines <- ''
+  idx.umeth.wig.lines <- ''
+  asm.bed.lines <- ''
+  asm.csv.lines <- 'chr\tstart\tend'
+
+  if(file_test("-f", file.path))
+  {
+    message("    processing ", file.path, "\t", date())
+      
+    # Load tagmeth file
+    
+    chr.tagmeth <- fread(file.path, sep="\t",  
+                         colClasses=c("factor","character","character", "character", 
+                                      "integer","integer", "character", "character", "character",
+                                      "integer", "integer", "integer"),
+                         showProgress=FALSE, data.table=FALSE)
+    # Assign colnames
+      
+    colnames(chr.tagmeth) <- c("tag", "type", "cvt", "chr", "pos", "size", "mpos", "upos", "xpos", "mcount", "ucount", "xcount")
+    
+    # Calculate the midpoint of tags
+    
+    chr.tagmeth$mid <- round(chr.tagmeth$pos + chr.tagmeth$size / 2)
+    
+    # Calculate methylation score
+      
+    chr.tagmeth$score <- chr.tagmeth$mcount / (chr.tagmeth$mcount + chr.tagmeth$ucount + chr.tagmeth$xcount)
+    
+    # build methylation virtual vectors
+      
+    chr.pos <- c(1: length(kGenome[[chr.name]]))
+    
+    # genrate tagmeth indexing
+    
+    # message("    generating tagmeth indexing file ", file.name, "\t", date())
+    chr.tagmeth.idx <- GenerateTagmethIndex(kGenome, chr.tagmeth, chr.name, chr.pos, params = list(mscore = kMethyScore, umscore = kUnmethyScore, swsize = kSlidingWindow))
+    
+    # generate asm files
+    
+    # message("    searching for asm regions ", "\t", date())
+    chr.tagmeth.asm <- GetASMOfTagmethIndex(chr.tagmeth.idx, kAsmSize, critera = list(meth = kMethyIndex, umeth = kUnmethyIndex, ratio = kIndexRatio))
+    chr.tagmeth.asm$chr <- rep(chr.name, nrow(chr.tagmeth.asm))
+    
+    # write wigfiles & bedfiles
+    
+    # message("    writting output files ", "\t", date())
+    chr.wig.title <- paste("fixedStep chrom=", chr.name, " start=", min(chr.tagmeth.idx$pos), " step=1 span=1", sep = "")
+    
+    meth.wig.lines <- c(chr.wig.title)
+    meth.wig.lines <- c(meth.wig.lines, paste(chr.tagmeth.idx$midx))
+    writeLines(meth.wig.lines, idx.meth.wig.file)
+
+    umeth.wig.lines <- c(chr.wig.title)
+    umeth.wig.lines <- c(umeth.wig.lines, paste(-chr.tagmeth.idx$umidx))
+    writeLines(umeth.wig.lines, idx.umeth.wig.file)
+
+    asm.csv.lines <- c(paste(paste(chr.tagmeth.asm$chr, chr.tagmeth.asm$start, chr.tagmeth.asm$end, sep = '\t')))
+    writeLines(asm.csv.lines, asm.csv.file)
+
+    asm.bed.lines <- c(paste(paste(chr.tagmeth.asm$chr, chr.tagmeth.asm$start, chr.tagmeth.asm$end, rep(1, nrow(chr.tagmeth.asm)), sep = '\t')))
+    writeLines(asm.bed.lines, asm.bed.file)
+
+    # message("    complete ", "\t", date())
+  }
+
+  close(idx.meth.wig.file)
+  close(idx.umeth.wig.file)
+  close(asm.bed.file)
+  close(asm.csv.file)
 }
+
+
+
+
